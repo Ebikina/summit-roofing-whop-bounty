@@ -1,0 +1,110 @@
+import { useState } from "react";
+import { createFileRoute } from "@tanstack/react-router";
+import { site } from "../site.config";
+import { checkAdmin, sendFinalInvoice } from "../server-fns";
+
+export const Route = createFileRoute("/admin")({
+  head: () => ({ meta: [{ title: `Admin | ${site.company}` }, { name: "robots", content: "noindex" }] }),
+  component: Admin,
+});
+
+function Admin() {
+  const [code, setCode] = useState("");
+  const [unlocked, setUnlocked] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function unlock(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setMsg(null);
+    try {
+      await checkAdmin({ data: { code } });
+      setUnlocked(true);
+    } catch (err) {
+      setMsg({ ok: false, text: err instanceof Error && err.message ? err.message : "Wrong code." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function bill(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const f = new FormData(form);
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await sendFinalInvoice({
+        data: {
+          email: String(f.get("email")),
+          name: String(f.get("name")),
+          amount: Number(f.get("amount")),
+          autoCharge: f.get("mode") === "auto",
+          code,
+        },
+      });
+      setMsg({
+        ok: true,
+        text:
+          r.mode === "auto_charge"
+            ? `Saved card charged. Invoice ID: ${r.id}. Status: ${r.status}.`
+            : `Invoice emailed. Invoice ID: ${r.id}. Status: ${r.status}.`,
+      });
+      form.reset();
+    } catch (err) {
+      setMsg({ ok: false, text: err instanceof Error ? err.message : "Something went wrong." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="mx-auto max-w-lg px-6 py-16">
+      <h1 className="font-display text-4xl font-bold tracking-wide uppercase">{site.company} admin</h1>
+      {!unlocked ? (
+        <form onSubmit={unlock} className="mt-8 grid gap-3">
+          <label className="grid gap-1 text-sm font-semibold">
+            Admin code
+            <input className="field" type="password" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" required />
+          </label>
+          <button className="btn" disabled={busy}>
+            Unlock
+          </button>
+        </form>
+      ) : (
+        <form onSubmit={bill} className="mt-8 grid gap-3">
+          <h2 className="text-xl font-semibold">Bill the final balance</h2>
+          <input className="field" name="name" placeholder="Customer name" required />
+          <input className="field" name="email" type="email" placeholder="Customer email" required />
+          <input className="field" name="amount" type="number" min="1" step="0.01" placeholder="Amount (USD)" required />
+          <fieldset className="grid gap-2 rounded-card border border-line bg-white p-4">
+            <legend className="px-1 text-sm font-semibold">How to collect</legend>
+            <label className="flex min-h-11 items-start gap-3">
+              <input type="radio" name="mode" value="auto" defaultChecked className="mt-1" />
+              <span>
+                Auto-charge the card saved with their deposit
+                <span className="block text-sm text-muted">Charges immediately. Needs a paid deposit.</span>
+              </span>
+            </label>
+            <label className="flex min-h-11 items-start gap-3">
+              <input type="radio" name="mode" value="send" className="mt-1" />
+              <span>
+                Email an invoice
+                <span className="block text-sm text-muted">Due in 7 days with a pay link.</span>
+              </span>
+            </label>
+          </fieldset>
+          <button className="btn" disabled={busy}>
+            {busy ? "Working..." : "Bill customer"}
+          </button>
+        </form>
+      )}
+      {msg && (
+        <p role={msg.ok ? "status" : "alert"} className={`mt-4 text-sm font-medium break-words ${msg.ok ? "text-green-800" : "text-red-700"}`}>
+          {msg.text}
+        </p>
+      )}
+    </main>
+  );
+}
