@@ -30,4 +30,5 @@ Whop Websites, Payment Elements (Checkout, Payments, PaymentElement,
 ExpressCheckoutElement, EmailElement, BrandingElement), setup intents,
 Leads API, Invoices API, and the Whop pixel (`whop.track`).
 
-Live demo: ADD YOUR LIVE URL HERE
+Live demo: summitroofs.whop.site
+
