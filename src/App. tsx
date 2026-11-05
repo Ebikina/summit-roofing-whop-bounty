@@ -1,0 +1,187 @@
+import { useState } from "react";
+import { Route } from "./routes/index";
+import { Check, MapPin, Phone, ShieldCheck } from "lucide-react";
+import { site, type PlanKey } from "./site.config";
+import { track } from "./tracking";
+import { EstimateForm } from "./EstimateForm";
+import { Checkout } from "./Checkout";
+import { submitLead } from "./server-fns";
+
+const label = "text-sm font-semibold tracking-widest text-accent uppercase";
+const h2 = "font-display text-4xl font-bold tracking-wide uppercase md:text-5xl";
+
+export default function App() {
+  // Deep link, e.g. /?open=deposit opens that checkout.
+  const { open } = Route.useSearch();
+  const [pay, setPay] = useState<PlanKey | null>(open ?? null);
+
+  return (
+    <div className="min-h-screen bg-paper text-ink">
+      <header className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-5">
+        <a href="/" className="font-display text-2xl font-bold tracking-wide uppercase">
+          {site.company}
+        </a>
+        <a href={`tel:${site.phone.replace(/[^+\d]/g, "")}`} className="flex min-h-11 items-center gap-2 font-semibold">
+          <Phone className="size-4 text-accent" aria-hidden />
+          {site.phone}
+        </a>
+      </header>
+
+      <main>
+        {/* Hero */}
+        <section className="relative isolate overflow-hidden bg-ink text-paper">
+          <RoofLines />
+          <div className="mx-auto max-w-6xl px-6 py-20 md:py-32">
+            <p className={label}>{site.hero.eyebrow}</p>
+            <h1 className="mt-4 max-w-3xl font-display text-5xl leading-[0.98] font-bold tracking-wide text-balance uppercase md:text-8xl">
+              {site.hero.headline}
+            </h1>
+            <p className="mt-6 max-w-xl text-lg leading-relaxed text-paper/80">{site.hero.body}</p>
+            <div className="mt-9 flex flex-wrap gap-4">
+              <a href="#estimate" className="btn">
+                {site.hero.primaryCta}
+              </a>
+              <a href="#book" className="btn btn-ghost border-paper! text-paper!">
+                {site.hero.secondaryCta}
+              </a>
+            </div>
+            <p className="mt-8 text-sm text-paper/70">{site.tagline}</p>
+          </div>
+        </section>
+
+        {/* Trust badges */}
+        <section className="border-b border-line">
+          <ul className="mx-auto grid max-w-6xl gap-6 px-6 py-10 sm:grid-cols-2 lg:grid-cols-4">
+            {site.trustBadges.map((b) => (
+              <li key={b.title} className="flex gap-3">
+                <ShieldCheck className="mt-1 size-5 shrink-0 text-accent" aria-hidden />
+                <div>
+                  <p className="font-semibold">{b.title}</p>
+                  <p className="text-sm text-muted">{b.body}</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        {/* Services */}
+        <section className="mx-auto max-w-6xl px-6 py-20 md:py-28" id="services">
+          <h2 className={h2}>Services</h2>
+          <ol className="mt-10 grid md:grid-cols-3 md:gap-x-10">
+            {site.services.map((s, i) => (
+              <li key={s.key} className="border-t border-line py-7">
+                <button
+                  type="button"
+                  className="w-full cursor-pointer text-left"
+                  onClick={() => track("service_viewed", { service: s.title })}
+                >
+                  <span className="font-display text-2xl text-accent tabular-nums">{String(i + 1).padStart(2, "0")}</span>
+                  <h3 className="mt-2 text-xl font-semibold">{s.title}</h3>
+                  <p className="mt-1 text-muted">{s.blurb}</p>
+                </button>
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        {/* Book online */}
+        <section id="book" className="bg-card">
+          <div className="mx-auto max-w-6xl px-6 py-20 md:py-28">
+            <h2 className={h2}>Book online</h2>
+            <p className="mt-3 max-w-xl text-muted">Pick an option and pay securely. Apple Pay and Google Pay work where your device supports them.</p>
+            <div className="mt-10 grid gap-4 md:grid-cols-3">
+              {(Object.entries(site.plans) as [PlanKey, (typeof site.plans)[PlanKey]][]).map(([k, p]) => (
+                <button
+                  key={k}
+                  type="button"
+                  aria-pressed={pay === k}
+                  onClick={() => setPay(k)}
+                  className={`cursor-pointer rounded-card border bg-white p-6 text-left transition hover:border-ink ${
+                    pay === k ? "border-accent ring-2 ring-accent" : "border-line"
+                  }`}
+                >
+                  <span className="block text-lg font-semibold">{p.label}</span>
+                  <span className="mt-2 block font-display text-5xl font-bold">${p.price}</span>
+                  <span className="mt-2 block text-sm text-muted">{p.blurb}</span>
+                </button>
+              ))}
+            </div>
+            {pay && <Checkout planKey={pay} />}
+          </div>
+        </section>
+
+        {/* Service area + financing */}
+        <section className="mx-auto grid max-w-6xl gap-12 px-6 py-20 md:grid-cols-2 md:py-28">
+          <div>
+            <h2 className={h2}>Service area</h2>
+            <ul className="mt-6 flex flex-wrap gap-3">
+              {site.cities.map((c) => (
+                <li key={c} className="flex items-center gap-2 rounded-card border border-line bg-white px-4 py-2">
+                  <MapPin className="size-4 text-accent" aria-hidden />
+                  {c}
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="rounded-card bg-ink p-8 text-paper">
+            <h2 className="font-display text-3xl font-bold tracking-wide uppercase">Financing</h2>
+            <p className="mt-3 text-lg text-paper/80">{site.financing}</p>
+          </div>
+        </section>
+
+        {/* Reviews */}
+        <section className="border-t border-line">
+          <div className="mx-auto max-w-6xl px-6 py-20 md:py-28">
+            <h2 className={h2}>What neighbors say</h2>
+            <div className="mt-10 grid gap-8 md:grid-cols-3">
+              {site.reviews.map((r) => (
+                <blockquote key={r.name} className="border-l-4 border-accent pl-5">
+                  <p className="text-lg">&ldquo;{r.text}&rdquo;</p>
+                  <footer className="mt-3 flex items-center gap-2 text-sm text-muted">
+                    <Check className="size-4 text-accent" aria-hidden /> {r.name}
+                  </footer>
+                </blockquote>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Estimate */}
+        <section id="estimate" className="bg-card">
+          <div className="mx-auto grid max-w-6xl gap-12 px-6 py-20 md:grid-cols-[1fr_1.2fr] md:py-28">
+            <div>
+              <h2 className={h2}>{site.hero.primaryCta}</h2>
+              <p className="mt-4 max-w-sm text-muted">Tell us about your roof. We reply within one business day.</p>
+            </div>
+            <EstimateForm submit={(f) => submitLead({ data: f })} />
+          </div>
+        </section>
+      </main>
+
+      <footer className="bg-ink text-paper">
+        <div className="mx-auto flex max-w-6xl flex-col gap-2 px-6 py-12 md:flex-row md:items-end md:justify-between">
+          <div>
+            <h2 className="font-display text-3xl font-bold tracking-wide uppercase">Contact</h2>
+            <p className="mt-2 text-paper/80">
+              {site.phone} · {site.email}
+            </p>
+          </div>
+          <p className="text-sm text-paper/60">
+            © {new Date().getFullYear()} {site.company}
+          </p>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+// Decorative ridge lines, drawn in CSS-friendly SVG so no image file is needed.
+function RoofLines() {
+  return (
+    <svg aria-hidden className="absolute inset-x-0 bottom-0 -z-10 h-full w-full opacity-[0.12]" viewBox="0 0 1200 600" preserveAspectRatio="xMidYMax slice">
+      {[0, 1, 2, 3, 4].map((i) => (
+        <path key={i} d={`M-50 ${560 - i * 70} L300 ${360 - i * 70} L600 ${520 - i * 70} L950 ${300 - i * 70} L1250 ${480 - i * 70}`} fill="none" stroke="#c9481a" strokeWidth="3" />
+      ))}
+    </svg>
+  );
+}
