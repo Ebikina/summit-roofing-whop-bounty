@@ -13,14 +13,15 @@ import {
 } from "@whop/elements-react";
 import { site, currency, type PlanKey } from "./site.config";
 import { track } from "./tracking";
-import { chargeDeposit, getDepositSetupConfig, payPlan, startDepositSetup } from "./server-fns";
+import { chargeDeposit, payPlan, startDepositSetup } from "./server-fns";
 
 // Every checkout is built the same way:
 //   1. ExpressCheckoutElement (Apple Pay / Google Pay), mounted in a Checkout handle
 //   2. PaymentElement + BrandingElement, mounted in a Payments handle, with our own Pay button
 // The two live in separate handles because Whop mounts the express button only inside Checkout.
 // Plans: express buys the plan, the form charges a confirmation token.
-// Deposit: both paths first save the card with a setup intent, then charge the $500 deposit to that saved card.
+// Deposit card form: save the card with a setup intent, then charge the $500 deposit to that saved card.
+// Deposit wallet: a normal $500 purchase of the deposit plan; /thanks then makes sure the card is saved.
 
 const here = (kind: string) => `${window.location.origin}/thanks?kind=${kind}`;
 const done = (kind: string, status: string, payment?: string) =>
@@ -98,7 +99,7 @@ function PlanForm({ planKey }: { planKey: "inspection" | "flat" }) {
     setError(null);
     try {
       const { confirmationToken } = await payments.createConfirmationToken({});
-      const payment = await payPlan({ data: { planKey, confirmationToken, returnUrl: here(planKey) } });
+      const payment = await payPlan({ data: { planKey, confirmationToken } });
       if (payment.status === "paid") return done(planKey, "succeeded", payment.id);
       const result = await whop.payments.handleNextAction({ clientSecret: payment.client_secret ?? "" });
       if (result.redirected) return;
@@ -128,23 +129,17 @@ function PlanForm({ planKey }: { planKey: "inspection" | "flat" }) {
 // ---------- Deposit: setup intent, then charge ----------
 
 function DepositPanel() {
-  const [configId, setConfigId] = useState<string | null>(null);
-  const [configError, setConfigError] = useState(false);
-
-  // Express (wallets) saves the card through a setup-mode checkout configuration.
-  useEffect(() => {
-    getDepositSetupConfig()
-      .then((c) => setConfigId(c.id))
-      .catch(() => setConfigError(true));
-  }, []);
-
+  const plan = site.plans.deposit;
   return (
     <div className="min-w-0">
-      {configId ? (
-        <ExpressDeposit configId={configId} />
-      ) : (
-        !configError && <div className="h-12 animate-pulse rounded-card bg-card" aria-hidden />
-      )}
+      {/* Wallet path: a normal plan purchase, so the Apple Pay / Google Pay sheet shows the deposit amount. */}
+      <WhopCheckout
+        plan={plan.id}
+        returnUrl={here("deposit_wallet")}
+        onComplete={(p: { result: string; paymentId?: string }) => done("deposit_wallet", "succeeded", p.paymentId)}
+      >
+        <ExpressCheckoutElement layout="horizontal" wallets={["apple_pay", "google_pay"]} />
+      </WhopCheckout>
       <Divider />
       <Payments accountId={site.accountId} mode="setup" currency="usd" setupFutureUsage="off_session" returnUrl={here("deposit_setup")}>
         <DepositForm />
@@ -153,39 +148,19 @@ function DepositPanel() {
   );
 }
 
-// Charges the deposit to the card the setup intent just saved. Used by both the wallet and the card form.
+// Charges the deposit to the card the setup intent just saved (card-form path).
 async function chargeSavedCard(whop: ReturnType<typeof useWhop>, setupIntentId: string) {
-  const payment = await chargeDeposit({ data: { setupIntentId, returnUrl: here("deposit") } });
-  if (payment.status === "paid") return done("deposit", "succeeded", payment.id);
-  const result = await whop!.payments.handleNextAction({ clientSecret: payment.client_secret ?? "" });
+  const r = await chargeDeposit({ data: { setupIntentId } });
+  if (r.state === "setup_pending") {
+    // Let /thanks wait for the setup to settle, then charge.
+    return window.location.assign(`${here("deposit_setup")}&setup=${setupIntentId}&status=succeeded`);
+  }
+  if (r.state === "paid") return done("deposit", "succeeded", r.id);
+  const result = await whop!.payments.handleNextAction({ clientSecret: r.client_secret ?? "" });
   if (result.redirected) return;
-  if (result.status === "succeeded") return done("deposit", "succeeded", payment.id);
-  if (result.status === "processing") return done("deposit", "processing", payment.id);
+  if (result.status === "succeeded") return done("deposit", "succeeded", r.id);
+  if (result.status === "processing") return done("deposit", "processing", r.id);
   throw new Error(result.lastPaymentError?.message ?? "The deposit wasn't completed. Your card was saved, please try again.");
-}
-
-function ExpressDeposit({ configId }: { configId: string }) {
-  const whop = useWhop();
-  const [error, setError] = useState<string | null>(null);
-  return (
-    <div className="min-w-0">
-      <WhopCheckout
-        checkoutConfiguration={configId}
-        returnUrl={here("deposit_setup")}
-        onComplete={async (p: { result: string; setupIntentId?: string }) => {
-          if (p.result !== "setup" || !p.setupIntentId) return;
-          try {
-            await chargeSavedCard(whop, p.setupIntentId);
-          } catch (e) {
-            setError(errorText(e));
-          }
-        }}
-      >
-        <ExpressCheckoutElement layout="horizontal" wallets={["apple_pay", "google_pay"]} />
-      </WhopCheckout>
-      {error && <ErrorLine text={error} />}
-    </div>
-  );
 }
 
 function DepositForm() {
@@ -202,7 +177,7 @@ function DepositForm() {
     try {
       // 1. Save the card (setup intent).
       const { confirmationToken } = await payments.createConfirmationToken({});
-      const setup = await startDepositSetup({ data: { confirmationToken, returnUrl: here("deposit_setup") } });
+      const setup = await startDepositSetup({ data: { confirmationToken } });
       if (setup.status === "canceled") throw new Error("That card couldn't be saved. Try a different one.");
       if (setup.status !== "succeeded") {
         const r = await whop.payments.handleNextAction({ clientSecret: setup.client_secret ?? "" });
