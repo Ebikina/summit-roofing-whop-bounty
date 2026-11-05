@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Route } from "./routes/index";
 import { Check, MapPin, Phone, ShieldCheck } from "lucide-react";
 import { site, type PlanKey } from "./site.config";
@@ -14,6 +14,13 @@ export default function App() {
   // Deep link, e.g. /?open=deposit opens that checkout.
   const { open } = Route.useSearch();
   const [pay, setPay] = useState<PlanKey | null>(open ?? null);
+
+  // A /?open=deposit style link scrolls to the checkout it opened.
+  useEffect(() => {
+    if (!open) return;
+    const t = setTimeout(() => document.getElementById("checkout")?.scrollIntoView({ behavior: "smooth", block: "start" }), 300);
+    return () => clearTimeout(t);
+  }, [open]);
 
   return (
     <div className="min-h-screen bg-paper text-ink">
@@ -73,7 +80,10 @@ export default function App() {
                 <button
                   type="button"
                   className="w-full cursor-pointer text-left"
-                  onClick={() => track("service_viewed", { service: s.title })}
+                  onClick={() => {
+                    track("service_viewed", { service: s.title });
+                    document.getElementById("book")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }}
                 >
                   <span className="font-display text-2xl text-accent tabular-nums">{String(i + 1).padStart(2, "0")}</span>
                   <h3 className="mt-2 text-xl font-semibold">{s.title}</h3>
@@ -185,3 +195,4 @@ function RoofLines() {
     </svg>
   );
 }
+
