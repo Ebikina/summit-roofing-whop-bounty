@@ -1,0 +1,247 @@
+import { useEffect, useState } from "react";
+import { loadWhop } from "@whop/elements";
+import {
+  BrandingElement,
+  Checkout as WhopCheckout,
+  EmailElement,
+  ExpressCheckoutElement,
+  PaymentElement,
+  Payments,
+  WhopElements,
+  usePayments,
+  useWhop,
+} from "@whop/elements-react";
+import { site, currency, type PlanKey } from "./site.config";
+import { track } from "./tracking";
+import { chargeDeposit, getDepositSetupConfig, payPlan, startDepositSetup } from "./server-fns";
+
+// Every checkout is built the same way:
+//   1. ExpressCheckoutElement (Apple Pay / Google Pay), mounted in a Checkout handle
+//   2. PaymentElement + BrandingElement, mounted in a Payments handle, with our own Pay button
+// The two live in separate handles because Whop mounts the express button only inside Checkout.
+// Plans: express buys the plan, the form charges a confirmation token.
+// Deposit: both paths first save the card with a setup intent, then charge the $500 deposit to that saved card.
+
+const here = (kind: string) => `${window.location.origin}/thanks?kind=${kind}`;
+const done = (kind: string, status: string, payment?: string) =>
+  window.location.assign(`${here(kind)}&status=${status}${payment ? `&payment=${payment}` : ""}`);
+
+export function Checkout({ planKey }: { planKey: PlanKey }) {
+  const plan = site.plans[planKey];
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
+  // deposit_started fires when the deposit checkout opens. Page views and checkout events are automatic.
+  useEffect(() => {
+    if (planKey === "deposit") track("deposit_started", { value: plan.price, currency });
+  }, [planKey, plan.price]);
+
+  return (
+    <div id="checkout" className="mt-6 min-w-0 rounded-card border border-line bg-white p-4 sm:p-6 md:p-8">
+      <h3 className="font-display text-2xl font-bold tracking-wide uppercase">
+        {plan.label} <span className="text-accent">${plan.price}</span>
+      </h3>
+      <p className="mt-1 text-muted">{plan.blurb}</p>
+      <div className="mt-6 min-w-0">
+        {mounted && (
+          <WhopElements elements={loadWhop()}>
+            {planKey === "deposit" ? <DepositPanel /> : <PlanPanel planKey={planKey} />}
+          </WhopElements>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Divider() {
+  return (
+    <div className="my-5 flex items-center gap-3 text-sm text-muted" role="separator">
+      <span className="h-px flex-1 bg-line" />
+      or pay by card
+      <span className="h-px flex-1 bg-line" />
+    </div>
+  );
+}
+
+// ---------- Inspection and flat-rate ----------
+
+function PlanPanel({ planKey }: { planKey: "inspection" | "flat" }) {
+  const plan = site.plans[planKey];
+  return (
+    <div className="min-w-0">
+      <WhopCheckout
+        key={planKey}
+        plan={plan.id}
+        returnUrl={here(planKey)}
+        onComplete={(p: { result: string; paymentId?: string }) => done(planKey, "succeeded", p.paymentId)}
+      >
+        <ExpressCheckoutElement layout="horizontal" wallets={["apple_pay", "google_pay"]} />
+      </WhopCheckout>
+      <Divider />
+      <Payments key={`${planKey}-pay`} accountId={site.accountId} plan={plan.id} returnUrl={here(planKey)}>
+        <PlanForm planKey={planKey} />
+      </Payments>
+    </div>
+  );
+}
+
+function PlanForm({ planKey }: { planKey: "inspection" | "flat" }) {
+  const payments = usePayments();
+  const whop = useWhop();
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function pay() {
+    if (!payments || !whop) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { confirmationToken } = await payments.createConfirmationToken({});
+      const payment = await payPlan({ data: { planKey, confirmationToken, returnUrl: here(planKey) } });
+      if (payment.status === "paid") return done(planKey, "succeeded", payment.id);
+      const result = await whop.payments.handleNextAction({ clientSecret: payment.client_secret ?? "" });
+      if (result.redirected) return;
+      if (result.status === "succeeded") return done(planKey, "succeeded", payment.id);
+      if (result.status === "processing") return done(planKey, "processing", payment.id);
+      setError(result.lastPaymentError?.message ?? "The payment step wasn't completed. Try again.");
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="grid min-w-0 gap-4">
+      <EmailElement />
+      <PaymentElement onChange={(event: { complete: boolean }) => setReady(event.complete)} />
+      <BrandingElement />
+      <button className="btn w-full" disabled={!ready || busy} onClick={pay}>
+        {busy ? "Processing..." : `Pay $${site.plans[planKey].price}`}
+      </button>
+      {error && <ErrorLine text={error} />}
+    </div>
+  );
+}
+
+// ---------- Deposit: setup intent, then charge ----------
+
+function DepositPanel() {
+  const [configId, setConfigId] = useState<string | null>(null);
+  const [configError, setConfigError] = useState(false);
+
+  // Express (wallets) saves the card through a setup-mode checkout configuration.
+  useEffect(() => {
+    getDepositSetupConfig()
+      .then((c) => setConfigId(c.id))
+      .catch(() => setConfigError(true));
+  }, []);
+
+  return (
+    <div className="min-w-0">
+      {configId ? (
+        <ExpressDeposit configId={configId} />
+      ) : (
+        !configError && <div className="h-12 animate-pulse rounded-card bg-card" aria-hidden />
+      )}
+      <Divider />
+      <Payments accountId={site.accountId} mode="setup" currency="usd" setupFutureUsage="off_session" returnUrl={here("deposit_setup")}>
+        <DepositForm />
+      </Payments>
+    </div>
+  );
+}
+
+// Charges the deposit to the card the setup intent just saved. Used by both the wallet and the card form.
+async function chargeSavedCard(whop: ReturnType<typeof useWhop>, setupIntentId: string) {
+  const payment = await chargeDeposit({ data: { setupIntentId, returnUrl: here("deposit") } });
+  if (payment.status === "paid") return done("deposit", "succeeded", payment.id);
+  const result = await whop!.payments.handleNextAction({ clientSecret: payment.client_secret ?? "" });
+  if (result.redirected) return;
+  if (result.status === "succeeded") return done("deposit", "succeeded", payment.id);
+  if (result.status === "processing") return done("deposit", "processing", payment.id);
+  throw new Error(result.lastPaymentError?.message ?? "The deposit wasn't completed. Your card was saved, please try again.");
+}
+
+function ExpressDeposit({ configId }: { configId: string }) {
+  const whop = useWhop();
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="min-w-0">
+      <WhopCheckout
+        checkoutConfiguration={configId}
+        returnUrl={here("deposit_setup")}
+        onComplete={async (p: { result: string; setupIntentId?: string }) => {
+          if (p.result !== "setup" || !p.setupIntentId) return;
+          try {
+            await chargeSavedCard(whop, p.setupIntentId);
+          } catch (e) {
+            setError(errorText(e));
+          }
+        }}
+      >
+        <ExpressCheckoutElement layout="horizontal" wallets={["apple_pay", "google_pay"]} />
+      </WhopCheckout>
+      {error && <ErrorLine text={error} />}
+    </div>
+  );
+}
+
+function DepositForm() {
+  const payments = usePayments();
+  const whop = useWhop();
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function pay() {
+    if (!payments || !whop) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // 1. Save the card (setup intent).
+      const { confirmationToken } = await payments.createConfirmationToken({});
+      const setup = await startDepositSetup({ data: { confirmationToken, returnUrl: here("deposit_setup") } });
+      if (setup.status === "canceled") throw new Error("That card couldn't be saved. Try a different one.");
+      if (setup.status !== "succeeded") {
+        const r = await whop.payments.handleNextAction({ clientSecret: setup.client_secret ?? "" });
+        if (r.redirected) return; // /thanks finishes the deposit after the off-site step
+        if (r.status !== "succeeded") throw new Error(r.lastPaymentError?.message ?? "The card wasn't saved. Try again.");
+      }
+      // 2. Charge the deposit to the saved card.
+      await chargeSavedCard(whop, setup.id);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="grid min-w-0 gap-4">
+      <EmailElement />
+      <PaymentElement onChange={(event: { complete: boolean }) => setReady(event.complete)} />
+      <BrandingElement />
+      <button className="btn w-full" disabled={!ready || busy} onClick={pay}>
+        {busy ? "Processing..." : `Save card and pay $${site.plans.deposit.price} deposit`}
+      </button>
+      <p className="text-sm text-muted">{site.depositNote}</p>
+      {error && <ErrorLine text={error} />}
+    </div>
+  );
+}
+
+function ErrorLine({ text }: { text: string }) {
+  return (
+    <p role="alert" className="mt-2 text-sm font-medium break-words text-red-700">
+      {text}
+    </p>
+  );
+}
+
+function errorText(e: unknown) {
+  const msg = e instanceof Error ? e.message : "";
+  if (/cancel/i.test(msg)) return "Payment cancelled.";
+  return msg && msg.length < 200 ? msg : "We couldn't take the payment. Please try again or call us.";
+}
